@@ -1,0 +1,209 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.0'
+          extensions: mbstring, pdo_sqlite
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install frontend dependencies
+        working-directory: frontend-react
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend-react
+        run: npm run build
+
+      - name: Run PHP unit tests
+        working-directory: laravel-app
+        run: |
+          composer install --no-progress --no-suggest --no-interaction
+          cp .env.example .env || true
+          php artisan key:generate || true
+          php artisan test --no-coverage
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.2
+      - name: Validate PHP files
+        run: |
+          php -l config/app.php
+          php -l config/database.php
+      - name: Run seeder
+        run: php scripts/seed_sqlite.php
+      - name: Verify sqlite content
+        run: |
+          sqlite3 database/database.sqlite "SELECT COUNT(*) FROM employees;" | grep -E "[0-9]+"
+
+  phpunit:
+    runs-on: ubuntu-latest
+    needs: lint-and-seed
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.2
+      - name: Get composer cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+      - name: Install composer deps for laravel-app
+        working-directory: ./laravel-app
+        run: composer install --no-interaction --prefer-dist --no-progress
+      - name: Run migrations and tests
+        working-directory: ./laravel-app
+        run: |
+          php artisan migrate --no-interaction --force
+          ./vendor/bin/phpunit --colors=never -v
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [phpunit]
+    services:
+      # no external services needed; Laravel will use sqlite in CI
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install frontend deps
+        working-directory: frontend-react
+        run: npm ci
+
+      - name: Cache frontend node_modules
+        uses: actions/cache@v4
+        with:
+          path: frontend-react/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend-react/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Cache npm cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('frontend-react/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install Playwright browsers
+        working-directory: frontend-react
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: 0
+        run: npx playwright install --with-deps
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: frontend-react/.playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('frontend-react/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Build frontend
+        working-directory: frontend-react
+        run: npm run build
+
+      - name: Set up PHP and composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.0'
+          extensions: mbstring, pdo_sqlite
+
+      - name: Install backend deps
+        working-directory: laravel-app
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Cache composer
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Prepare DB and migrate (fresh sqlite)
+        working-directory: laravel-app
+        run: |
+          set -e
+          cp .env.example .env || true
+          php artisan key:generate || true
+          # ensure a fresh sqlite file for deterministic E2E runs
+          if [ -f database/database.sqlite ]; then rm database/database.sqlite; fi
+          mkdir -p database
+          touch database/database.sqlite
+          php artisan migrate --force
+          # seed minimal data required by UI/tests
+          php artisan db:seed --class=DatabaseSeeder --force || true
+
+      - name: Start Laravel server
+        working-directory: laravel-app
+        run: nohup php -S 127.0.0.1:8002 -t public > server.log 2>&1 &
+
+      - name: Wait for server
+        run: |
+          n=0
+          until curl -sSf http://127.0.0.1:8002/ >/dev/null || [ $n -ge 15 ]; do
+            n=$((n+1)); echo "waiting... $n"; sleep 1;
+          done
+
+      - name: Run Playwright E2E (all projects)
+        working-directory: frontend-react
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: 0
+        run: npx playwright test --reporter=list
+
+      - name: Upload Playwright artifacts (on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            frontend-react/test-results
+            frontend-react/playwright-report
+            frontend-react/.playwright
