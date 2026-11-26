@@ -29,7 +29,7 @@ This is a local prototype. It has **no login, no roles and no authorization**: a
 - Tested on sqlite only (not MySQL), and no hosted CI has run.
 - The Node workflow in `.github/workflows/node.js.yml` is unchanged and still fails at `npm ci`, because the repo has no Node project at its root.
 - `frontend/`, `backend/` and `mobile/` still hold only placeholder files. The docker, nginx and supervisor files are still empty.
-- `composer.lock` is not committed.
+- `composer.lock` is committed (application dependency lock). `vendor/` stays ignored. Install with `composer install`.
 
 ## Earlier status snapshot (before the bootstrap)
 
