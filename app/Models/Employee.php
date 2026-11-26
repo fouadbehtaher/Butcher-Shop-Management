@@ -19,6 +19,10 @@ class Employee extends Model
         'status'
     ];
 
+    protected $casts = [
+        'hire_date' => 'date',
+    ];
+
     public function attendances()
     {
         return $this->hasMany(Attendance::class);
